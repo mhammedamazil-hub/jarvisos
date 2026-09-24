@@ -1,0 +1,17 @@
+# ---- JARVIS runtime (all from Debian main) ----
+python3
+python3-pyqt5
+python3-psutil
+python3-numpy
+python3-pil
+python3-xlib
+python3-opencv
+python3-pip
+python3-venv
+python3-tk
+tesseract-ocr
+tesseract-ocr-eng
+espeak-ng
+libportaudio2
+python3-sounddevice
+xbindkeys

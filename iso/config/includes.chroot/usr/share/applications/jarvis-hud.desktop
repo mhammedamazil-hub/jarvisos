@@ -1,0 +1,7 @@
+[Desktop Entry]
+Type=Application
+Name=JARVIS HUD
+Exec=jarvis-hud %f
+Icon=computer
+Categories=Utility;System;
+MimeType=

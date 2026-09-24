@@ -1,0 +1,13 @@
+#!/bin/sh
+# Runtime self-test used by test-iso.sh (result goes to the serial console).
+out=/tmp/jarvis-selftest.log
+{
+  echo "== jarvis doctor =="; /usr/local/bin/jarvis doctor
+  echo "== core offline command =="; /usr/local/bin/jarvis --local do "set camera fps to 9"
+  echo "== config =="; /usr/local/bin/jarvis config get vision.fps
+  echo "== network =="; nmcli -t general status 2>&1; ip -brief addr
+  echo "== windows =="; wmctrl -l 2>&1
+  echo "== jarvisd =="; systemctl --user is-active jarvisd 2>&1
+} > $out 2>&1
+if grep -q '"value": 9' $out; then echo "JARVIS-SELFTEST-PASS"; else echo "JARVIS-SELFTEST-FAIL"; fi
+cat $out

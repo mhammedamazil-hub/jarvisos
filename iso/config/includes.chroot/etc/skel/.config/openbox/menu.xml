@@ -1,0 +1,17 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<openbox_menu xmlns="http://openbox.org/3.4/menu">
+<menu id="root-menu" label="JARVISOS">
+  <item label="JARVIS HUD"><action name="Execute"><command>jarvis-hudctl toggle</command></action></item>
+  <item label="Terminal"><action name="Execute"><command>lxterminal</command></action></item>
+  <item label="JARVIS Files"><action name="Execute"><command>jarvis-files</command></action></item>
+  <item label="JARVIS Editor"><action name="Execute"><command>jarvis-edit</command></action></item>
+  <item label="Firefox"><action name="Execute"><command>firefox-esr</command></action></item>
+  <item label="JARVIS Settings"><action name="Execute"><command>jarvis-settings</command></action></item>
+  <separator/>
+  <item label="STOP JARVIS"><action name="Execute"><command>jarvis stop</command></action></item>
+  <item label="Restart JARVIS core"><action name="Execute"><command>systemctl --user restart jarvisd</command></action></item>
+  <item label="Recovery: disk tools (GParted)"><action name="Execute"><command>gparted</command></action></item>
+  <separator/>
+  <item label="Log out"><action name="Exit"/></item>
+</menu>
+</openbox_menu>

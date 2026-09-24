@@ -1,0 +1,18 @@
+[Unit]
+Description=JARVIS core daemon
+After=graphical-session.target
+PartOf=graphical-session.target
+
+[Service]
+ExecStart=/usr/local/bin/jarvisd
+Restart=on-failure
+RestartSec=3
+# resource guard for 4 GB machines
+MemoryHigh=450M
+MemoryMax=700M
+CPUWeight=80
+Nice=5
+Environment=PYTHONUNBUFFERED=1
+
+[Install]
+WantedBy=default.target

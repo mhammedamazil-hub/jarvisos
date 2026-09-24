@@ -1,0 +1,3 @@
+#!/bin/sh
+export PYTHONPATH=/opt/jarvisos${PYTHONPATH:+:$PYTHONPATH}
+exec /opt/jarvisos/venv/bin/python3 -m jarvis.cli "$@"

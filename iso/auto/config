@@ -1,0 +1,21 @@
+#!/bin/sh
+# live-build configuration for JARVISOS (Debian 12 bookworm, amd64, BIOS+UEFI hybrid ISO)
+set -e
+lb config noauto \
+  --distribution bookworm \
+  --architectures amd64 \
+  --archive-areas "main contrib non-free non-free-firmware" \
+  --binary-images iso-hybrid \
+  --bootloaders "grub-efi,syslinux" \
+  --debian-installer "${JARVIS_INSTALLER:-none}" \
+  --debian-installer-gui false \
+  --iso-application "JARVISOS" \
+  --iso-volume "JARVISOS" \
+  --iso-publisher "JARVISOS project" \
+  --memtest none \
+  --apt-recommends false \
+  --firmware-chroot true \
+  --bootappend-live "boot=live components quiet splash username=jarvis hostname=jarvisos locales=en_US.UTF-8 persistence persistence-label=persistence console=tty0 console=ttyS0,115200" \
+  --mirror-bootstrap "${JARVIS_MIRROR:-http://deb.debian.org/debian}" \
+  --mirror-binary "http://deb.debian.org/debian" \
+  "${@}"

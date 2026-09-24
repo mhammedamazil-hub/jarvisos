@@ -1,0 +1,25 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<openbox_config xmlns="http://openbox.org/3.4/rc">
+  <resistance><strength>10</strength><screen_edge_strength>20</screen_edge_strength></resistance>
+  <focus><focusNew>yes</focusNew><followMouse>no</followMouse></focus>
+  <placement><policy>Smart</policy><center>yes</center></placement>
+  <theme><name>Onyx</name><titleLayout>NLIMC</titleLayout><keepBorder>yes</keepBorder><animateIconify>no</animateIconify>
+    <font place="ActiveWindow"><name>DejaVu Sans</name><size>10</size><weight>bold</weight></font></theme>
+  <desktops><number>4</number><names><name>MAIN</name><name>DEV</name><name>CREATE</name><name>WEB</name></names></desktops>
+  <keyboard>
+    <keybind key="A-Tab"><action name="NextWindow"/></keybind>
+    <keybind key="W-Right"><action name="GoToDesktop"><to>right</to><wrap>yes</wrap></action></keybind>
+    <keybind key="W-Left"><action name="GoToDesktop"><to>left</to><wrap>yes</wrap></action></keybind>
+    <keybind key="W-d"><action name="ToggleShowDesktop"/></keybind>
+    <keybind key="A-F4"><action name="Close"/></keybind>
+    <keybind key="W-Up"><action name="ToggleMaximize"/></keybind>
+  </keyboard>
+  <mouse><context name="Root"><mousebind button="Right" action="Press"><action name="ShowMenu"><menu>root-menu</menu></action></mousebind></context></mouse>
+  <applications>
+    <!-- The HUD is the desktop layer: below every normal window, never blocks apps -->
+    <application class="JarvisHUD" name="*">
+      <decor>no</decor><layer>below</layer><desktop>all</desktop><skip_taskbar>yes</skip_taskbar>
+      <skip_pager>yes</skip_pager><maximized>yes</maximized><focus>no</focus>
+    </application>
+  </applications>
+</openbox_config>

@@ -1,0 +1,13 @@
+# JARVIS global hotkeys (change with: jarvis do "set hotkeys.command to ..." then re-login)
+"jarvis-hudctl command"
+  Mod4 + space
+"jarvis-hudctl voice"
+  Mod4 + v
+"jarvis-hudctl launcher"
+  Mod4 + a
+"jarvis-files"
+  Mod4 + f
+"jarvis-hudctl stop"
+  Control+Mod4 + Escape
+"lxterminal"
+  Mod4 + Return

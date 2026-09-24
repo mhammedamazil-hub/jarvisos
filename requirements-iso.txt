@@ -1,0 +1,5 @@
+# pip-only deps installed into /opt/jarvisos/venv (everything else comes from Debian packages)
+pyautogui==0.9.54
+mss==9.0.2
+pynput==1.7.7
+vosk==0.3.45

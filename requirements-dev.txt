@@ -1,0 +1,4 @@
+pytest
+psutil
+numpy
+PyQt5

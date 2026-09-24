@@ -1,0 +1,9 @@
+[
+  {"gesture": "OPEN_PALM",     "action": {"type": "UI", "command": "show_hud"}, "enabled": true, "confidence_threshold": 0.75, "cooldown_ms": 1000},
+  {"gesture": "FIST",          "action": {"type": "UI", "command": "hide_hud"}, "enabled": true, "confidence_threshold": 0.75, "cooldown_ms": 1000},
+  {"gesture": "PINCH",         "action": {"type": "MOUSE", "button": "left"}, "enabled": true, "confidence_threshold": 0.8, "cooldown_ms": 400},
+  {"gesture": "SWIPE_RIGHT",   "action": {"type": "WINDOW", "command": "next_workspace"}, "enabled": true, "confidence_threshold": 0.7, "cooldown_ms": 1200},
+  {"gesture": "THUMBS_UP",     "action": {"type": "APPROVAL", "command": "confirm"}, "enabled": true, "confidence_threshold": 0.85, "cooldown_ms": 1500},
+  {"gesture": "TWO_FINGERS",   "action": {"type": "OPEN_APPLICATION", "application": "code"}, "enabled": true, "confidence_threshold": 0.75, "cooldown_ms": 1000},
+  {"gesture": "THREE_FINGERS", "action": {"type": "OPEN_APPLICATION", "application": "blender"}, "enabled": true, "confidence_threshold": 0.75, "cooldown_ms": 1000}
+]

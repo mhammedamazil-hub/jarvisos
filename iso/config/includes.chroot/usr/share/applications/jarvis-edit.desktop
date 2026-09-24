@@ -1,0 +1,7 @@
+[Desktop Entry]
+Type=Application
+Name=JARVIS Editor
+Exec=jarvis-edit %f
+Icon=accessories-text-editor
+Categories=Utility;System;
+MimeType=text/plain;

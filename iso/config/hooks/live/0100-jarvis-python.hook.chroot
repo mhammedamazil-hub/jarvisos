@@ -1,0 +1,16 @@
+#!/bin/sh
+# Install pip-only JARVIS deps into an isolated venv that can see Debian's python packages.
+set -e
+python3 -m venv --system-site-packages /opt/jarvisos/venv
+/opt/jarvisos/venv/bin/pip install --no-cache-dir -r /opt/jarvisos/requirements-iso.txt
+if [ -f /opt/jarvisos/.with-mediapipe ]; then
+  /opt/jarvisos/venv/bin/pip install --no-cache-dir "mediapipe==0.10.14" || echo "WARNING: mediapipe install failed; hand tracking will report it at runtime"
+fi
+if [ -f /opt/jarvisos/.with-vosk-model ]; then
+  mkdir -p /usr/share/jarvis && cd /tmp
+  curl -fsSLo vosk.zip https://alphacephei.com/vosk/models/vosk-model-small-en-us-0.15.zip && \
+    python3 -m zipfile -e vosk.zip /usr/share/jarvis/ && mv /usr/share/jarvis/vosk-model-small-en-us-0.15 /usr/share/jarvis/vosk-model || \
+    echo "WARNING: vosk model download failed"
+  rm -f vosk.zip
+fi
+python3 -m compileall -q /opt/jarvisos/jarvis || true

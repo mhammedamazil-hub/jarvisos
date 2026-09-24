@@ -1,0 +1,11 @@
+# JARVISOS session — everything optional: if a piece fails the Openbox desktop still works.
+xsetroot -solid "#03080f" &
+dunst &
+nm-applet &
+tint2 &
+xbindkeys -f /etc/jarvis/xbindkeysrc &
+systemctl --user import-environment DISPLAY XAUTHORITY
+systemctl --user restart jarvisd &
+(sleep 2; /usr/local/bin/jarvis-hud) &
+# serial self-test when booted by test-iso.sh (kernel cmdline contains jarvis.selftest)
+grep -q jarvis.selftest /proc/cmdline && (sleep 25; /usr/local/bin/jarvis-selftest | sudo tee /dev/ttyS0 >/dev/null) &

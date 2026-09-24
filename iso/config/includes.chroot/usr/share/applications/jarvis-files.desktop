@@ -1,0 +1,7 @@
+[Desktop Entry]
+Type=Application
+Name=JARVIS Files
+Exec=jarvis-files %f
+Icon=system-file-manager
+Categories=Utility;System;
+MimeType=inode/directory;

@@ -1,0 +1,13 @@
+#!/bin/sh
+set -e
+# Enable user services globally (jarvisd runs as the logged-in user, never root)
+mkdir -p /etc/systemd/user/default.target.wants
+ln -sf /etc/systemd/user/jarvisd.service /etc/systemd/user/default.target.wants/jarvisd.service
+systemctl enable jarvis-bootcheck.service || true
+systemctl enable NetworkManager lightdm bluetooth || true
+# Openbox is the default session
+update-alternatives --set x-session-manager /usr/bin/openbox-session 2>/dev/null || true
+chmod 0755 /usr/local/bin/jarvis*
+# trim image
+apt-get clean
+rm -rf /usr/share/doc/* /usr/share/man/* /var/lib/apt/lists/* 2>/dev/null || true

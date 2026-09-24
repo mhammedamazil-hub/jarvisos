@@ -1,0 +1,5 @@
+[
+  {"count": 1, "action": {"type": "OPEN_APPLICATION", "application": "discord"}, "enabled": true},
+  {"count": 2, "action": {"type": "OPEN_APPLICATION", "application": "code"}, "enabled": true},
+  {"count": 3, "action": {"type": "UI", "command": "show_hud"}, "enabled": true}
+]

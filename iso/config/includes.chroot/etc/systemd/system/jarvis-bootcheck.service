@@ -1,0 +1,10 @@
+[Unit]
+Description=JARVISOS boot marker on serial console (used by test-iso.sh)
+After=multi-user.target
+
+[Service]
+Type=oneshot
+ExecStart=/bin/sh -c 'echo "JARVISOS-BOOT-OK $(uname -r) mem=$(free -m | awk "/Mem/{print \\$2}")MB" > /dev/ttyS0 || true'
+
+[Install]
+WantedBy=multi-user.target

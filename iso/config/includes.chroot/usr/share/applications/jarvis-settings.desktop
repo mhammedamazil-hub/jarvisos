@@ -1,0 +1,7 @@
+[Desktop Entry]
+Type=Application
+Name=JARVIS Settings
+Exec=jarvis-settings %f
+Icon=preferences-system
+Categories=Utility;System;
+MimeType=
