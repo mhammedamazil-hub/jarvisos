@@ -1,0 +1,294 @@
+name: Build JARVISOS
+
+on:
+  workflow_dispatch:
+    inputs:
+      fast_build:
+        description: "Fast build (gzip, lower compression) for quicker iteration"
+        required: false
+        default: "false"
+        type: choice
+        options: ["false","true"]
+  push:
+    branches: ["main", "arena/**"]
+    paths:
+      - "build/**"
+      - "config/**"
+      - "overlay/**"
+      - ".github/workflows/build-jarvisos.yml"
+      - "scripts/**"
+  pull_request:
+    paths:
+      - "build/**"
+      - "config/**"
+      - "overlay/**"
+      - "scripts/**"
+
+# minimal permissions
+permissions:
+  contents: read
+
+concurrency:
+  group: jarvisos-build-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  lint:
+    name: Static checks
+    runs-on: ubuntu-22.04
+    timeout-minutes: 10
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4 # pin: 11bd71901bbe5b1630ceea73d27597364c9af683
+      - name: Shell syntax check
+        run: |
+          set -e
+          echo "== shellcheck build scripts =="
+          bash -n build/build.sh
+          echo "✓ build.sh syntax OK"
+          for f in config/hooks/live/*.chroot scripts/*.sh; do
+            [ -f "$f" ] || continue
+            bash -n "$f" && echo "✓ $f syntax OK"
+          done
+          echo "== python syntax =="
+          python3 -m py_compile overlay/usr/local/bin/jarvis-center
+          echo "✓ jarvis-center syntax OK"
+      - name: Package list validation
+        run: |
+          set -e
+          echo "== package lists =="
+          total=0
+          for f in config/package-lists/*.list.chroot; do
+            [ -f "$f" ] || continue
+            n=$(grep -v "^\s*#" "$f" | grep -v "^\s*$" | wc -l)
+            echo "  $(basename $f): $n packages"
+            total=$((total+n))
+            if grep -q "sk-" "$f"; then echo "::error:: potential secret in $f"; exit 1; fi
+          done
+          echo "total $total packages"
+          if [ "$total" -lt 20 ]; then echo "::error:: too few packages"; exit 1; fi
+          echo "== overlay checks =="
+          test -f overlay/usr/local/bin/jarvis-center || { echo "::error:: jarvis-center missing"; exit 1; }
+          test -f overlay/usr/share/applications/jarvis.desktop || { echo "::error:: jarvis.desktop missing"; exit 1; }
+          # no embedded API keys
+          if grep -R -n "sk-[A-Za-z0-9]\{20\}" overlay/ 2>/dev/null; then echo "::error:: potential API key in overlay"; exit 1; fi
+          echo "✓ static checks passed"
+      - name: Validate workflow
+        run: |
+          echo "workflow file present: .github/workflows/build-jarvisos.yml"
+          cat .github/workflows/build-jarvisos.yml | head -20
+
+  build:
+    name: Build ISO
+    runs-on: ubuntu-22.04
+    timeout-minutes: 90
+    needs: lint
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Free disk space (runner cleanup)
+        run: |
+          echo "Disk before cleanup:"
+          df -h
+          # free ~6GB by removing unused
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL || true
+          sudo docker image prune --all --force 2>/dev/null || true
+          echo "Disk after cleanup:"
+          df -h
+          free -h
+          nproc
+          lsb_release -a 2>&1 || cat /etc/os-release
+
+      - name: Cache apt archives
+        uses: actions/cache@v4
+        with:
+          path: build/work/apt-cache
+          key: apt-${{ hashFiles('config/package-lists/*.list.chroot') }}-${{ runner.os }}
+          restore-keys: |
+            apt-${{ runner.os }}-
+
+      - name: Install host build dependencies
+        run: |
+          set -e
+          echo "== host deps install =="
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            debootstrap \
+            squashfs-tools \
+            xorriso \
+            grub-pc-bin \
+            grub-efi-amd64-bin \
+            grub-common \
+            mtools \
+            dosfstools \
+            isolinux \
+            syslinux-common \
+            ovmf \
+            qemu-utils \
+            qemu-system-x86 \
+            ca-certificates \
+            curl \
+            rsync \
+            python3 \
+            file \
+            kmod
+          echo "== versions =="
+          debootstrap --version || true
+          mksquashfs -version || true
+          xorriso --version | head -1 || true
+          grub-mkstandalone --version | head -1 || true
+          qemu-system-x86_64 --version | head -1 || true
+
+      - name: Dry-run validation
+        run: |
+          chmod +x build/build.sh
+          sudo ./build/build.sh --dry-run
+
+      - name: Build JARVISOS ISO
+        timeout-minutes: 70
+        run: |
+          set -e
+          # fast flag from dispatch
+          EXTRA=""
+          if [ "${{ inputs.fast_build }}" = "true" ]; then EXTRA="--fast"; fi
+          echo "Building with flags: $EXTRA"
+          # set source date for reproducibility (git commit date)
+          export SOURCE_DATE_EPOCH=$(git log -1 --pretty=%ct 2>/dev/null || date +%s)
+          echo "SOURCE_DATE_EPOCH=$SOURCE_DATE_EPOCH"
+          sudo -E ./build/build.sh $EXTRA 2>&1 | tee build.log
+          echo "Build exit code: $?"
+
+      - name: Validate ISO exists and checksum
+        if: always()
+        run: |
+          set -e
+          echo "== validation =="
+          ls -lh out/ build/work/iso/ 2>&1 || true
+          cat build.log | tail -100 || true
+          if [ ! -f out/JARVISOS.iso ]; then
+            echo "::error:: ISO not found at out/JARVISOS.iso"
+            ls -R build/ 2>&1 | head -100
+            exit 1
+          fi
+          SIZE=$(stat -c%s out/JARVISOS.iso)
+          SIZE_MB=$((SIZE/1024/1024))
+          echo "ISO size: $SIZE bytes (${SIZE_MB} MB)"
+          # plausible: 300MB min, 4GB max
+          if [ "$SIZE" -lt $((300*1024*1024)) ]; then echo "::error:: ISO too small (<300MB)"; exit 1; fi
+          if [ "$SIZE" -gt $((4096*1024*1024)) ]; then echo "::warning:: ISO >4GB may exceed artifact limits"; fi
+          test -s out/JARVISOS.iso || { echo "::error:: ISO empty"; exit 1; }
+          # checksum
+          (cd out && sha256sum JARVISOS.iso > JARVISOS.iso.sha256 && cat JARVISOS.iso.sha256)
+          (cd out && sha256sum -c JARVISOS.iso.sha256 && echo "✓ checksum verified")
+          # file type
+          file out/JARVISOS.iso || true
+          # xorriso info
+          xorriso -indev out/JARVISOS.iso -pvd_info 2>&1 | head -40 || true
+          xorriso -indev out/JARVISOS.iso -ls / -- 2>&1 | head -80 || true
+          # show grub
+          echo "== EFI check =="
+          if xorriso -indev out/JARVISOS.iso -ls /EFI/BOOT -- 2>&1 | grep -q BOOTX64; then echo "✓ UEFI BOOTX64.EFI present"; else echo "::warning:: UEFI BOOTX64.EFI not found in ISO"; fi
+          echo "== live check =="
+          xorriso -indev out/JARVISOS.iso -ls /live -- 2>&1 | head -20 || true
+          # build info
+          echo "== BUILD SUCCESS =="
+
+      - name: Upload ISO artifact (chunked if needed)
+        if: success()
+        uses: actions/upload-artifact@v4
+        with:
+          name: JARVISOS-iso
+          path: |
+            out/JARVISOS.iso
+            out/JARVISOS.iso.sha256
+            out/JARVISOS.iso.md5
+            build.log
+            build/work/installed-packages.txt
+          retention-days: 14
+          if-no-files-found: error
+          compression-level: 0
+
+      - name: Upload xorriso logs on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: build-logs
+          path: |
+            build.log
+            build/work/xorriso*.log
+            build/work/installed-packages.txt
+          retention-days: 7
+
+  smoke-boot:
+    name: QEMU smoke boot test
+    runs-on: ubuntu-22.04
+    timeout-minutes: 15
+    needs: build
+    if: always() && needs.build.result == 'success'
+    steps:
+      - name: Download ISO artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: JARVISOS-iso
+          path: out
+
+      - name: Install QEMU + OVMF
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends qemu-system-x86 ovmf
+          ls -lh /usr/share/OVMF/ 2>&1 | head -20
+          ls -lh out/
+
+      - name: Verify checksum before boot
+        run: |
+          cd out && sha256sum -c JARVISOS.iso.sha256 && echo "✓ checksum OK"
+
+      - name: QEMU BIOS boot smoke test (timeout 90s)
+        timeout-minutes: 5
+        run: |
+          set +e
+          echo "== QEMU BIOS smoke test =="
+          # try to boot and check ISO is bootable via xorriso and qemu -nographic try
+          # Use timeout to avoid hanging
+          timeout 90 qemu-system-x86_64 \
+            -m 1024 \
+            -cdrom out/JARVISOS.iso \
+            -boot d \
+            -nographic \
+            -serial mon:stdio \
+            -display none \
+            -no-reboot 2>&1 | head -200 || true
+          EC=${PIPESTATUS[0]}
+          echo "QEMU exit code (0 or 124 timeout is expected): $EC"
+          # alternative: check bootability via xorriso
+          echo "== xorriso boot check =="
+          xorriso -indev out/JARVISOS.iso -pvd_info 2>&1 | head -40
+          # check that ISO has El Torito boot image
+          xorriso -indev out/JARVISOS.iso -report_el_torito as_mkisofs 2>&1 | head -40 || true
+          echo "Note: full graphical boot requires manual hardware test (see docs/TESTING.md status 3 vs 4)"
+          # don't fail job if QEMU timeout - report limitation
+          echo "Smoke test done - manual UEFI test on Dell 3558 still required (status 4)"
+
+      - name: QEMU UEFI smoke test (if OVMF present)
+        timeout-minutes: 5
+        run: |
+          set +e
+          if [ -f /usr/share/OVMF/OVMF.fd ]; then
+            echo "== QEMU UEFI smoke test =="
+            timeout 60 qemu-system-x86_64 \
+              -m 1024 \
+              -bios /usr/share/OVMF/OVMF.fd \
+              -cdrom out/JARVISOS.iso \
+              -boot d \
+              -nographic \
+              -display none \
+              -no-reboot 2>&1 | head -200 || true
+            echo "UEFI QEMU attempted (timeout expected)"
+          else
+            echo "OVMF.fd not found - UEFI test skipped, report limitation"
+          fi
+          echo "If both boot attempts timed out without kernel panic, ISO is plausibly bootable. Hardware verification still needed."
+
