@@ -1,0 +1,36 @@
+#!/bin/bash
+set -e
+# live-build hook: configure JARVISOS inside chroot
+echo "JARVIS hook: configuring system..."
+
+# create live user
+if ! id jarvis >/dev/null 2>&1; then
+  useradd -m -s /bin/bash -G sudo,audio,video,netdev,bluetooth,plugdev jarvis || true
+  echo "jarvis:jarvis" | chpasswd
+fi
+# passwordless sudo for live (convenient, will be locked for installed system)
+echo "jarvis ALL=(ALL) NOPASSWD:ALL" > /etc/sudoers.d/jarvis-live
+chmod 440 /etc/sudoers.d/jarvis-live
+
+# enable services
+systemctl enable NetworkManager || true
+systemctl enable lightdm || true
+systemctl enable bluetooth || true
+systemctl enable avahi-daemon || true
+
+# set hostname
+echo "jarvisos" > /etc/hostname
+echo "127.0.1.1 jarvisos" >> /etc/hosts
+
+# timezone UTC, locale en_US
+echo "UTC" > /etc/timezone || true
+
+# make jarvis scripts executable
+chmod +x /usr/local/bin/jarvis* || true
+chmod +x /etc/skel/.config/openbox/autostart || true
+
+# update desktop database
+update-desktop-database /usr/share/applications || true
+gtk-update-icon-cache -f /usr/share/icons/hicolor || true
+
+echo "JARVIS hook done"

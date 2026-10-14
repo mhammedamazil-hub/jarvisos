@@ -1,0 +1,23 @@
+#!/bin/bash
+set -e
+echo "=== JARVISOS Recovery ==="
+echo "Date: $(date -u)"
+echo "Kernel: $(uname -r)"
+echo "Memory: $(free -h | head -1); $(free -h | tail -1)"
+echo "Disk: $(df -h / | tail -1)"
+echo "Network: $(nmcli device status 2>&1 | head -20)"
+echo "---"
+echo "Options:"
+echo "1) Restart desktop: sudo systemctl restart lightdm"
+echo "2) Check Xorg log: cat /var/log/Xorg.0.log | tail -50"
+echo "3) Check JARVIS: jarvis-center --cli"
+echo "4) Reconfigure display: dpkg-reconfigure xserver-xorg"
+echo "5) Network: nmcli device wifi list; nmcli device wifi connect SSID password PASS"
+echo ""
+if [ "$1" = "--check" ]; then
+  echo "[check] Testing JARVIS CLI..."
+  jarvis-center --cli && echo "JARVIS CLI OK" || echo "JARVIS CLI failed"
+  echo "[check] Checking desktop files..."
+  ls -l /usr/share/applications/jarvis*.desktop /usr/local/bin/jarvis* 2>&1
+  echo "[check] Done"
+fi

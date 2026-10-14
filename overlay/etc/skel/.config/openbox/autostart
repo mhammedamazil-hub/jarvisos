@@ -1,0 +1,41 @@
+#!/bin/bash
+# JARVISOS autostart - lightweight, 4GB optimized
+# Disable compositing for performance (no picom) unless needed
+# Set wallpaper / background
+if which hsetroot >/dev/null 2>&1; then hsetroot -solid "#0a1128" &
+elif which xsetroot >/dev/null 2>&1; then xsetroot -solid "#0a1128" &
+fi
+
+# Tint2 panel
+if which tint2 >/dev/null 2>&1; then tint2 &
+fi
+
+# NetworkManager applet
+if which nm-applet >/dev/null 2>&1; then nm-applet &
+fi
+
+# Volume
+if which volumeicon >/dev/null 2>&1; then volumeicon &
+fi
+# Bluetooth
+if which blueman-applet >/dev/null 2>&1; then blueman-applet &
+fi
+
+# Power manager (light)
+if which xfce4-power-manager >/dev/null 2>&1; then xfce4-power-manager &
+fi
+
+# Notifications
+if which dunst >/dev/null 2>&1; then dunst &
+elif which notify-osd >/dev/null 2>&1; then /usr/lib/notification-daemon/notification-daemon &
+fi
+
+# Polkit
+if which lxpolkit >/dev/null 2>&1; then lxpolkit &
+fi
+
+# Launch JARVIS center after 2s (let panel settle)
+(sleep 2 && jarvis-center) &
+
+# Screensaver off for live
+xset s off -dpms &

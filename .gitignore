@@ -1,0 +1,21 @@
+# build artifacts
+build/work/
+out/
+*.iso
+*.sha256
+*.md5
+build.log
+# cache
+.cache/
+# python
+__pycache__/
+*.pyc
+# OS
+.DS_Store
+Thumbs.db
+# secrets - never commit
+**/config.json
+!**/config.json.example
+*.key
+*.pem
+.env

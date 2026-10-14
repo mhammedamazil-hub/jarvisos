@@ -1,0 +1,10 @@
+[Desktop Entry]
+Name=JARVIS Command Center
+Comment=Central command input — What would you like me to do?
+Exec=jarvis-center
+Icon=utilities-terminal
+Terminal=false
+Type=Application
+Categories=Utility;GTK;
+StartupNotify=true
+Keywords=jarvis;assistant;launcher;ai;

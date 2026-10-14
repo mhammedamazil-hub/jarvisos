@@ -1,0 +1,18 @@
+# JARVISOS base - Debian bookworm minimal + live
+linux-image-amd64
+linux-headers-amd64
+firmware-linux-free
+firmware-misc-nonfree
+live-boot
+live-boot-doc
+live-config
+live-config-systemd
+systemd
+systemd-sysv
+dbus
+udev
+isc-dhcp-client
+ifupdown
+net-tools
+iproute2
+isc-dhcp-client

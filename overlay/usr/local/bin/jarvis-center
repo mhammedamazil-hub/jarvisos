@@ -1,0 +1,868 @@
+#!/usr/bin/env python3
+"""
+JARVIS Command Center - lightweight GTK3 desktop shell for JARVISOS
+Designed for 4GB RAM, no heavy frameworks, no embedded ML models.
+Offline-first: launcher + system info always work. AI features require user-supplied API keys.
+"""
+import os
+import sys
+import json
+import subprocess
+import shlex
+import threading
+import time
+import pathlib
+import re
+
+try:
+    import gi
+    gi.require_version('Gtk', '3.0')
+    gi.require_version('Gdk', '3.0')
+    gi.require_version('Gio', '2.0')
+    gi.require_version('GLib', '2.0')
+    from gi.repository import Gtk, Gdk, Gio, GLib, Pango
+    HAS_GTK = True
+except Exception as e:
+    HAS_GTK = False
+    print(f"GTK not available: {e}", file=sys.stderr)
+
+CONFIG_DIRS = [
+    pathlib.Path.home() / ".config" / "jarvis" / "config.json",
+    pathlib.Path("/etc/jarvis/config.json"),
+]
+
+DEFAULT_CONFIG = {
+    "ai_provider": "none",  # none, openai, anthropic, ollama, custom
+    "api_key": "",
+    "api_base": "",
+    "model": "",
+    "offline_mode": True,
+    "voice_enabled": False,
+}
+
+# Whitelisted actions for computer control (least privilege)
+ALLOWED_LAUNCHERS = {
+    "files": "pcmanfm",
+    "terminal": "lxterminal",
+    "browser": "firefox-esr",
+    "browser_alt": "firefox",
+    "settings": "jarvis-settings",
+    "editor": "mousepad",
+}
+
+DESTRUCTIVE_KEYWORDS = ["rm -rf", "mkfs", "dd if=", ":(){", "shutdown", "reboot", "poweroff", "format", "wipe"]
+
+def load_config():
+    cfg = DEFAULT_CONFIG.copy()
+    for p in CONFIG_DIRS:
+        if p.exists():
+            try:
+                data = json.loads(p.read_text())
+                cfg.update({k: v for k, v in data.items() if k in DEFAULT_CONFIG})
+                break
+            except Exception:
+                continue
+    # env override (for secure secret handling)
+    if os.environ.get("JARVIS_API_KEY"):
+        cfg["api_key"] = os.environ["JARVIS_API_KEY"]
+    if os.environ.get("JARVIS_API_PROVIDER"):
+        cfg["ai_provider"] = os.environ["JARVIS_API_PROVIDER"]
+    return cfg
+
+def save_config(cfg):
+    p = pathlib.Path.home() / ".config" / "jarvis" / "config.json"
+    p.parent.mkdir(parents=True, exist_ok=True)
+    # only save non-secret fields visibly? Save all but restrict perms
+    # Never log the key
+    p.write_text(json.dumps(cfg, indent=2))
+    try:
+        p.chmod(0o600)
+    except Exception:
+        pass
+
+def get_system_info():
+    info = {}
+    # memory
+    try:
+        with open("/proc/meminfo") as f:
+            for line in f:
+                if line.startswith("MemTotal:"):
+                    info["mem_total"] = line.split()[1] + " kB"
+                if line.startswith("MemAvailable:"):
+                    info["mem_avail"] = line.split()[1] + " kB"
+    except Exception:
+        pass
+    # cpu
+    try:
+        with open("/proc/loadavg") as f:
+            info["load"] = f.read().strip().split()[:3]
+    except Exception:
+        info["load"] = ["?","?","?"]
+    # uptime
+    try:
+        with open("/proc/uptime") as f:
+            secs = float(f.read().split()[0])
+            info["uptime"] = f"{int(secs//3600)}h {int((secs%3600)//60)}m"
+    except Exception:
+        info["uptime"] = "?"
+    # network
+    try:
+        out = subprocess.check_output(["nmcli","-t","-f","DEVICE,STATE","device","status"], stderr=subprocess.DEVNULL, text=True, timeout=2)
+        info["nm"] = out.strip()
+    except Exception:
+        info["nm"] = "NetworkManager unavailable"
+    # disk
+    try:
+        out = subprocess.check_output(["df","-h","/"], text=True, timeout=2)
+        info["disk"] = out.strip().splitlines()[-1]
+    except Exception:
+        info["disk"] = "?"
+    return info
+
+def is_destructive(cmd):
+    low = cmd.lower()
+    for k in DESTRUCTIVE_KEYWORDS:
+        if k in low:
+            return True
+    return False
+
+def find_desktop_apps():
+    apps = []
+    dirs = ["/usr/share/applications", str(pathlib.Path.home()/".local/share/applications")]
+    for d in dirs:
+        if not os.path.isdir(d):
+            continue
+        for fn in sorted(os.listdir(d)):
+            if not fn.endswith(".desktop"):
+                continue
+            try:
+                app = Gio.DesktopAppInfo.new_from_filename(os.path.join(d, fn))
+                if app and app.should_show():
+                    apps.append(app)
+            except Exception:
+                continue
+    # dedupe by id
+    seen=set()
+    uniq=[]
+    for a in apps:
+        iid = a.get_id()
+        if iid not in seen:
+            seen.add(iid)
+            uniq.append(a)
+    return sorted(uniq, key=lambda a: a.get_display_name().lower())
+
+def launch_app(appinfo):
+    try:
+        # use Gio launching which respects sandbox
+        appinfo.launch([], None)
+        return True
+    except Exception as e:
+        print(f"launch failed: {e}", file=sys.stderr)
+        return False
+
+# --- AI placeholder (cloud-only, user-supplied key) ---
+def ai_query(prompt, config):
+    """
+    Placeholder for cloud AI. Never embeds keys. Returns offline fallback if not configured.
+    """
+    provider = config.get("ai_provider","none")
+    key = config.get("api_key","").strip()
+    if provider == "none" or not key:
+        return None, "AI not configured — set your API key in Settings. Running offline mode: I can still launch apps and show system info."
+    # If configured, do NOT make network call here; instead show status.
+    # Actual network call would happen only when user explicitly enables and has network.
+    # For safety in live ISO, we don't auto-call providers.
+    # Return a hint that it's ready
+    return None, f"AI provider '{provider}' configured. Network query not executed in offline preview — would send to {provider} with model {config.get('model','default')}."
+
+# --- GTK UI ---
+CSS = b"""
+window {
+  background: #0a1128;
+  color: #e0e6ed;
+}
+#jarvis-title {
+  font-size: 22px;
+  font-weight: 700;
+  color: #e0e6ed;
+  letter-spacing: 1px;
+}
+#jarvis-subtitle {
+  font-size: 11px;
+  color: #7aa0c4;
+  letter-spacing: 0.5px;
+}
+#command-entry {
+  background: #111e3a;
+  color: #e0e6ed;
+  border: 1px solid #1e3a5f;
+  border-radius: 12px;
+  padding: 12px 16px;
+  font-size: 14px;
+  caret-color: #00d4ff;
+}
+#command-entry:focus {
+  border-color: #00d4ff;
+  box-shadow: 0 0 0 1px rgba(0,212,255,0.3);
+}
+#mic-button {
+  background: #0d1b2a;
+  border: 1px solid #1e3a5f;
+  border-radius: 10px;
+  color: #7aa0c4;
+  padding: 6px 12px;
+}
+#mic-button:hover {
+  border-color: #00d4ff;
+  color: #00d4ff;
+}
+#app-grid button {
+  background: #111e3a;
+  border: 1px solid #1e3a5f;
+  border-radius: 12px;
+  padding: 14px 8px;
+  color: #c8d6e5;
+  transition: all 150ms ease;
+}
+#app-grid button:hover {
+  background: #162447;
+  border-color: #00b4d8;
+  color: #ffffff;
+}
+#app-grid button:active {
+  background: #1b3a5f;
+}
+#status-card {
+  background: #0d1b2a;
+  border: 1px solid #1e3a5f;
+  border-radius: 10px;
+  padding: 12px;
+}
+#status-label {
+  font-size: 11px;
+  color: #7aa0c4;
+  font-weight: 600;
+}
+#status-value {
+  font-size: 11px;
+  color: #c8d6e5;
+  font-family: monospace;
+}
+#response-area {
+  background: #0d1b2a;
+  border: 1px solid #1e3a5f;
+  border-radius: 10px;
+  padding: 12px;
+  color: #c8d6e5;
+  font-size: 12px;
+}
+#settings-panel {
+  background: #0d1b2a;
+  border: 1px solid #1e3a5f;
+  border-radius: 10px;
+  padding: 16px;
+}
+"""
+
+if HAS_GTK:
+    class JarvisWindow(Gtk.Window):
+        def __init__(self):
+            super().__init__(title="JARVIS Command Center")
+            self.config = load_config()
+            self.set_default_size(760, 560)
+            self.set_position(Gtk.WindowPosition.CENTER)
+            self.set_icon_name("utilities-terminal")
+            self.connect("destroy", Gtk.main_quit)
+            self.connect("key-press-event", self.on_key)
+    
+            # CSS
+            provider = Gtk.CssProvider()
+            provider.load_from_data(CSS)
+            Gtk.StyleContext.add_provider_for_screen(Gdk.Screen.get_default(), provider, Gtk.STYLE_PROVIDER_PRIORITY_APPLICATION)
+    
+            # Main container
+            outer = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=0)
+            outer.set_margin_top(18)
+            outer.set_margin_bottom(18)
+            outer.set_margin_start(18)
+            outer.set_margin_end(18)
+            self.add(outer)
+    
+            # Header: title + status
+            header = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=12)
+            title_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=2)
+            title = Gtk.Label(label="JARVIS")
+            title.set_name("jarvis-title")
+            title.set_halign(Gtk.Align.START)
+            subtitle = Gtk.Label(label="COMMAND CENTER  •  JARVISOS")
+            subtitle.set_name("jarvis-subtitle")
+            subtitle.set_halign(Gtk.Align.START)
+            title_box.pack_start(title, False, False, 0)
+            title_box.pack_start(subtitle, False, False, 0)
+            header.pack_start(title_box, True, True, 0)
+    
+            # AI status badge
+            self.ai_badge = Gtk.Label()
+            self.update_ai_badge()
+            self.ai_badge.set_halign(Gtk.Align.END)
+            self.ai_badge.set_valign(Gtk.Align.CENTER)
+            header.pack_start(self.ai_badge, False, False, 0)
+    
+            outer.pack_start(header, False, False, 6)
+    
+            # Separator
+            sep = Gtk.Separator(orientation=Gtk.Orientation.HORIZONTAL)
+            sep.set_margin_top(10)
+            sep.set_margin_bottom(14)
+            outer.pack_start(sep, False, False, 0)
+    
+            # Command input row
+            cmd_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=10)
+            self.entry = Gtk.Entry()
+            self.entry.set_name("command-entry")
+            self.entry.set_placeholder_text("What would you like me to do?")
+            self.entry.set_hexpand(True)
+            self.entry.connect("activate", self.on_command)
+            cmd_box.pack_start(self.entry, True, True, 0)
+    
+            self.mic_btn = Gtk.Button(label="◉  Mic")
+            self.mic_btn.set_name("mic-button")
+            self.mic_btn.set_tooltip_text("Voice control (requires microphone & voice-enabled config)")
+            self.mic_btn.connect("clicked", self.on_mic)
+            cmd_box.pack_start(self.mic_btn, False, False, 0)
+    
+            go_btn = Gtk.Button(label="↵")
+            go_btn.set_tooltip_text("Run (Enter)")
+            go_btn.connect("clicked", self.on_command)
+            cmd_box.pack_start(go_btn, False, False, 0)
+    
+            outer.pack_start(cmd_box, False, False, 6)
+    
+            # Hint
+            hint = Gtk.Label(label="Try:  open files  •  open terminal  •  open browser  •  system info  •  clear  •  help  •  Super+Space to focus")
+            hint.set_name("status-label")
+            hint.set_halign(Gtk.Align.START)
+            hint.set_line_wrap(True)
+            outer.pack_start(hint, False, False, 4)
+    
+            # Notebook: Launcher / System / Settings / Response
+            self.notebook = Gtk.Notebook()
+            self.notebook.set_margin_top(12)
+            outer.pack_start(self.notebook, True, True, 0)
+    
+            # App grid page
+            self.app_grid_page = self.build_launcher_page()
+            self.notebook.append_page(self.app_grid_page, Gtk.Label(label="Launcher"))
+    
+            # System info page
+            self.sys_page = self.build_system_page()
+            self.notebook.append_page(self.sys_page, Gtk.Label(label="System"))
+    
+            # Settings page
+            self.settings_page = self.build_settings_page()
+            self.notebook.append_page(self.settings_page, Gtk.Label(label="Settings"))
+    
+            # Response area at bottom (always visible below notebook)
+            self.response = Gtk.Label(label="Welcome to JARVISOS. Offline mode ready. Configure AI in Settings when you have network.")
+            self.response.set_name("response-area")
+            self.response.set_halign(Gtk.Align.FILL)
+            self.response.set_valign(Gtk.Align.START)
+            self.response.set_line_wrap(True)
+            self.response.set_selectable(True)
+            self.response.set_xalign(0)
+            self.response.set_margin_top(10)
+            # wrap in scrolled
+            scr = Gtk.ScrolledWindow()
+            scr.set_policy(Gtk.PolicyType.AUTOMATIC, Gtk.PolicyType.AUTOMATIC)
+            scr.set_min_content_height(90)
+            scr.add(self.response)
+            outer.pack_start(scr, False, True, 0)
+    
+            # Footer
+            footer = Gtk.Label(label="JARVISOS  •  Debian 12 (bookworm)  •  Openbox  •  4 GB optimized  •  Press Esc to clear  •  Ctrl+Q to quit")
+            footer.set_name("status-label")
+            footer.set_margin_top(8)
+            outer.pack_start(footer, False, False, 0)
+    
+            # periodic system refresh
+            GLib.timeout_add_seconds(5, self.refresh_system)
+    
+            self.show_all()
+            # focus entry
+            self.entry.grab_focus()
+    
+        def build_launcher_page(self):
+            box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=10)
+            box.set_margin_top(10)
+            box.set_margin_start(6)
+            box.set_margin_end(6)
+    
+            # Primary quick actions
+            quick = Gtk.Grid()
+            quick.set_name("app-grid")
+            quick.set_column_homogeneous(True)
+            quick.set_row_homogeneous(True)
+            quick.set_column_spacing(10)
+            quick.set_row_spacing(10)
+    
+            quick_apps = [
+                ("Files", "folder", "pcmanfm"),
+                ("Terminal", "utilities-terminal", "lxterminal"),
+                ("Browser", "web-browser", "firefox-esr"),
+                ("Settings", "preferences-system", "jarvis-settings"),
+                ("Editor", "text-editor", "mousepad"),
+                ("Network", "network-workgroup", "nm-connection-editor"),
+                ("Audio", "audio-volume-high", "pavucontrol"),
+                ("Bluetooth", "bluetooth", "blueman-manager"),
+            ]
+            for idx, (label, icon, cmd) in enumerate(quick_apps):
+                btn = Gtk.Button()
+                v = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=6)
+                img = Gtk.Image.new_from_icon_name(icon, Gtk.IconSize.DIALOG)
+                # fallback if icon missing
+                lbl = Gtk.Label(label=label)
+                lbl.set_justify(Gtk.Justification.CENTER)
+                v.pack_start(img, False, False, 0)
+                v.pack_start(lbl, False, False, 0)
+                btn.add(v)
+                btn.connect("clicked", lambda w, c=cmd, l=label: self.launch_cmd(c, l))
+                quick.attach(btn, idx % 4, idx // 4, 1, 1)
+    
+            box.pack_start(quick, False, False, 0)
+    
+            # All apps search + grid
+            sep = Gtk.Separator()
+            box.pack_start(sep, False, False, 4)
+    
+            search_row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
+            self.app_search = Gtk.SearchEntry()
+            self.app_search.set_placeholder_text("Search applications...")
+            self.app_search.connect("search-changed", self.on_app_search)
+            search_row.pack_start(self.app_search, True, True, 0)
+            refresh = Gtk.Button(label="↻ Refresh")
+            refresh.connect("clicked", lambda w: self.populate_all_apps())
+            search_row.pack_start(refresh, False, False, 0)
+            box.pack_start(search_row, False, False, 0)
+    
+            self.all_apps_store = []
+            self.all_apps_grid = Gtk.FlowBox()
+            self.all_apps_grid.set_name("app-grid")
+            self.all_apps_grid.set_homogeneous(True)
+            self.all_apps_grid.set_max_children_per_line(4)
+            self.all_apps_grid.set_selection_mode(Gtk.SelectionMode.NONE)
+            self.all_apps_grid.set_row_spacing(8)
+            self.all_apps_grid.set_column_spacing(8)
+    
+            scrolled = Gtk.ScrolledWindow()
+            scrolled.set_policy(Gtk.PolicyType.NEVER, Gtk.PolicyType.AUTOMATIC)
+            scrolled.set_min_content_height(180)
+            scrolled.add(self.all_apps_grid)
+            box.pack_start(scrolled, True, True, 0)
+    
+            self.populate_all_apps()
+            return box
+    
+        def populate_all_apps(self):
+            for child in self.all_apps_grid.get_children():
+                self.all_apps_grid.remove(child)
+            self.all_apps_store = find_desktop_apps()
+            self.filter_apps("")
+    
+        def filter_apps(self, query):
+            for child in self.all_apps_grid.get_children():
+                self.all_apps_grid.remove(child)
+            q = query.lower().strip()
+            shown=0
+            for app in self.all_apps_store:
+                name = app.get_display_name()
+                desc = app.get_description() or ""
+                if q and q not in name.lower() and q not in desc.lower() and q not in (app.get_id().lower()):
+                    continue
+                btn = Gtk.Button()
+                btn.set_tooltip_text(f"{name}\n{desc}\n{app.get_id()}")
+                v = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=4)
+                v.set_margin_top(6)
+                v.set_margin_bottom(6)
+                icon = app.get_icon()
+                if icon:
+                    try:
+                        img = Gtk.Image.new_from_gicon(icon, Gtk.IconSize.DND)
+                    except Exception:
+                        img = Gtk.Image.new_from_icon_name("application-x-executable", Gtk.IconSize.DND)
+                else:
+                    img = Gtk.Image.new_from_icon_name("application-x-executable", Gtk.IconSize.DND)
+                lbl = Gtk.Label(label=name)
+                lbl.set_line_wrap(True)
+                lbl.set_max_width_chars(14)
+                lbl.set_ellipsize(Pango.EllipsizeMode.END)
+                v.pack_start(img, False, False, 0)
+                v.pack_start(lbl, False, False, 0)
+                btn.add(v)
+                # capture app
+                btn.connect("clicked", lambda w, a=app: launch_app(a))
+                self.all_apps_grid.add(btn)
+                shown+=1
+                if shown>80:
+                    break
+            self.all_apps_grid.show_all()
+    
+        def on_app_search(self, entry):
+            self.filter_apps(entry.get_text())
+    
+        def build_system_page(self):
+            box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=10)
+            box.set_margin_top(10)
+            box.set_margin_start(6)
+            box.set_margin_end(6)
+    
+            self.sys_labels = {}
+            grid = Gtk.Grid()
+            grid.set_column_spacing(16)
+            grid.set_row_spacing(10)
+            grid.set_margin_top(6)
+    
+            items = [("Memory", "mem"), ("Load (1/5/15)", "load"), ("Uptime", "uptime"), ("Disk /", "disk"), ("Network", "nm")]
+            for i,(label,key) in enumerate(items):
+                l = Gtk.Label(label=label)
+                l.set_name("status-label")
+                l.set_halign(Gtk.Align.START)
+                v = Gtk.Label(label="...")
+                v.set_name("status-value")
+                v.set_halign(Gtk.Align.START)
+                v.set_selectable(True)
+                v.set_line_wrap(True)
+                grid.attach(l, 0, i, 1, 1)
+                grid.attach(v, 1, i, 1, 1)
+                self.sys_labels[key]=v
+    
+            box.pack_start(grid, False, False, 0)
+    
+            # quick actions
+            actions = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
+            actions.set_margin_top(10)
+            for label, cmd in [("System Info", "lshw -short"), ("Processes", "lxterminal -e htop"), ("Disk Usage", "lxterminal -e bash -c 'df -h; echo; du -sh ~/* 2>/dev/null | sort -hr | head -20; read -p \"Press Enter\"'")]:
+                b = Gtk.Button(label=label)
+                b.connect("clicked", lambda w,c=cmd: subprocess.Popen(c, shell=True))
+                actions.pack_start(b, False, False, 0)
+            box.pack_start(actions, False, False, 0)
+    
+            # recovery
+            rec = Gtk.Label(label="Recovery: If desktop fails, press Ctrl+Alt+F2 for TTY, log in as 'jarvis' / 'jarvis', then run 'jarvis-recovery'.")
+            rec.set_name("status-label")
+            rec.set_line_wrap(True)
+            rec.set_margin_top(12)
+            box.pack_start(rec, False, False, 0)
+    
+            self.refresh_system()
+            return box
+    
+        def refresh_system(self):
+            info = get_system_info()
+            # mem
+            if "mem" in self.sys_labels:
+                mem_str = f"Total {info.get('mem_total','?')}  Avail {info.get('mem_avail','?')}"
+                self.sys_labels["mem"].set_text(mem_str)
+            if "load" in self.sys_labels:
+                self.sys_labels["load"].set_text(" ".join(info.get("load", [])))
+            if "uptime" in self.sys_labels:
+                self.sys_labels["uptime"].set_text(info.get("uptime","?"))
+            if "disk" in self.sys_labels:
+                self.sys_labels["disk"].set_text(info.get("disk","?")[:120])
+            if "nm" in self.sys_labels:
+                txt = info.get("nm","?")[:200].replace("|","  ")
+                self.sys_labels["nm"].set_text(txt if txt else "unknown")
+            return True
+    
+        def build_settings_page(self):
+            box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=10)
+            box.set_margin_top(10)
+            box.set_margin_start(6)
+            box.set_margin_end(6)
+            box.set_name("settings-panel")
+    
+            title = Gtk.Label(label="AI Provider Configuration  (cloud, user-supplied keys)")
+            title.set_halign(Gtk.Align.START)
+            title.set_name("status-label")
+            box.pack_start(title, False, False, 0)
+    
+            desc = Gtk.Label(label="Keys are stored in ~/.config/jarvis/config.json (chmod 600) and never committed to Git or the ISO. Leave empty for offline mode. Browser and desktop work offline.")
+            desc.set_line_wrap(True)
+            desc.set_halign(Gtk.Align.START)
+            desc.set_name("status-value")
+            box.pack_start(desc, False, False, 0)
+    
+            grid = Gtk.Grid()
+            grid.set_column_spacing(10)
+            grid.set_row_spacing(8)
+            grid.set_margin_top(8)
+    
+            # provider
+            grid.attach(Gtk.Label(label="Provider:"), 0, 0, 1, 1)
+            self.provider_combo = Gtk.ComboBoxText()
+            for p in ["none","openai","anthropic","ollama","custom"]:
+                self.provider_combo.append_text(p)
+            try:
+                idx = ["none","openai","anthropic","ollama","custom"].index(self.config.get("ai_provider","none"))
+            except Exception:
+                idx=0
+            self.provider_combo.set_active(idx)
+            grid.attach(self.provider_combo, 1, 0, 1, 1)
+    
+            grid.attach(Gtk.Label(label="API Key:"), 0, 1, 1, 1)
+            self.key_entry = Gtk.Entry()
+            self.key_entry.set_visibility(False)
+            self.key_entry.set_placeholder_text("sk-... (stored locally, never in Git)")
+            if self.config.get("api_key"):
+                self.key_entry.set_text("•" * 12 + " (saved)")
+                self.key_entry.set_tooltip_text("Key is saved locally (hidden). Enter a new key to replace.")
+            grid.attach(self.key_entry, 1, 1, 1, 1)
+    
+            grid.attach(Gtk.Label(label="API Base / URL:"), 0, 2, 1, 1)
+            self.base_entry = Gtk.Entry()
+            self.base_entry.set_placeholder_text("https://api.openai.com/v1  (optional)")
+            self.base_entry.set_text(self.config.get("api_base",""))
+            grid.attach(self.base_entry, 1, 2, 1, 1)
+    
+            grid.attach(Gtk.Label(label="Model:"), 0, 3, 1, 1)
+            self.model_entry = Gtk.Entry()
+            self.model_entry.set_placeholder_text("gpt-4o, claude-3-5-sonnet, llama3, ...")
+            self.model_entry.set_text(self.config.get("model",""))
+            grid.attach(self.model_entry, 1, 3, 1, 1)
+    
+            box.pack_start(grid, False, False, 0)
+    
+            self.voice_check = Gtk.CheckButton(label="Enable voice control (requires mic + network)")
+            self.voice_check.set_active(bool(self.config.get("voice_enabled", False)))
+            box.pack_start(self.voice_check, False, False, 6)
+    
+            btn_row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
+            save = Gtk.Button(label="Save Configuration")
+            save.get_style_context().add_class("suggested-action")
+            save.connect("clicked", self.on_save_settings)
+            test = Gtk.Button(label="Test (no network call)")
+            test.connect("clicked", self.on_test_settings)
+            clear = Gtk.Button(label="Clear Key")
+            clear.connect("clicked", self.on_clear_key)
+            btn_row.pack_start(save, False, False, 0)
+            btn_row.pack_start(test, False, False, 0)
+            btn_row.pack_start(clear, False, False, 0)
+            box.pack_start(btn_row, False, False, 6)
+    
+            self.settings_status = Gtk.Label(label="")
+            self.settings_status.set_name("status-value")
+            self.settings_status.set_line_wrap(True)
+            box.pack_start(self.settings_status, False, False, 0)
+    
+            # help
+            help_lbl = Gtk.Label(label="Need help? Offline: use Launcher. Online: after saving, type a question in the command bar. JARVIS will indicate if AI is unavailable.")
+            help_lbl.set_line_wrap(True)
+            help_lbl.set_name("status-label")
+            help_lbl.set_margin_top(10)
+            box.pack_start(help_lbl, False, False, 0)
+    
+            return box
+    
+        def on_save_settings(self, btn):
+            provider = self.provider_combo.get_active_text()
+            key_text = self.key_entry.get_text()
+            # if placeholder with bullets, keep old key
+            if "•" in key_text:
+                key = self.config.get("api_key","")
+            else:
+                key = key_text.strip()
+            cfg = {
+                "ai_provider": provider,
+                "api_key": key,
+                "api_base": self.base_entry.get_text().strip(),
+                "model": self.model_entry.get_text().strip(),
+                "voice_enabled": self.voice_check.get_active(),
+                "offline_mode": (provider=="none" or not key)
+            }
+            save_config(cfg)
+            self.config = cfg
+            self.update_ai_badge()
+            self.settings_status.set_text("✓ Saved to ~/.config/jarvis/config.json (chmod 600). Restart or type a command to use.")
+            self.set_response("Settings saved. " + ("Offline mode." if cfg["offline_mode"] else f"Provider {provider} configured. Type a prompt to test."))
+    
+        def on_test_settings(self, btn):
+            # no real network, just validate
+            provider = self.provider_combo.get_active_text()
+            key = self.key_entry.get_text()
+            if "•" in key:
+                key = self.config.get("api_key","")
+            if provider=="none" or not key.strip():
+                self.settings_status.set_text("⚠ Not configured — will run offline. Launcher and system info still work.")
+            else:
+                self.settings_status.set_text(f"✓ Provider {provider} has a key (not shown). Would connect to {self.base_entry.get_text() or 'default endpoint'} with model '{self.model_entry.get_text() or 'default'}'. Actual network test requires internet.")
+    
+        def on_clear_key(self, btn):
+            self.key_entry.set_text("")
+            self.settings_status.set_text("Key field cleared (save to persist).")
+    
+        def update_ai_badge(self):
+            prov = self.config.get("ai_provider","none")
+            has_key = bool(self.config.get("api_key","").strip())
+            if prov=="none" or not has_key:
+                txt = "●  Offline mode"
+                color="#7aa0c4"
+            else:
+                txt = f"●  {prov} ready"
+                color="#00d4ff"
+            self.ai_badge.set_markup(f'<span foreground="{color}" weight="bold">{txt}</span>')
+    
+        def launch_cmd(self, cmd, label):
+            if cmd=="jarvis-settings":
+                self.notebook.set_current_page(2)
+                self.set_response(f"Opened Settings — configure AI provider for '{label}'.")
+                return
+            # map to actual binary with fallback
+            tried=[]
+            for c in [cmd, cmd.replace("-esr",""), "firefox"]:
+                if self.is_available(c.split()[0]):
+                    try:
+                        subprocess.Popen(shlex.split(c), stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                        self.set_response(f"Launched {label} ({c})")
+                        return
+                    except Exception as e:
+                        tried.append(str(e))
+            self.set_response(f"Could not launch {label} ({cmd}). Tried: {tried}. Available launchers: see Launcher tab.")
+    
+        def is_available(self, binname):
+            return subprocess.call(["which", binname], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)==0
+    
+        def set_response(self, text):
+            self.response.set_text(text)
+            print(f"[JARVIS] {text}")
+    
+        def on_mic(self, btn):
+            if not self.config.get("voice_enabled"):
+                self.set_response("Voice control is disabled — enable it in Settings (requires mic + network). Offline fallback: type your command.")
+                self.notebook.set_current_page(2)
+                return
+            if not self.config.get("api_key"):
+                self.set_response("Voice needs AI configuration — set API key in Settings first.")
+                return
+            self.set_response("Listening... (voice placeholder — mic capture not yet implemented on this hardware; please type instead)")
+    
+        def on_command(self, widget):
+            raw = self.entry.get_text().strip()
+            if not raw:
+                return
+            self.entry.set_text("")
+            low = raw.lower().strip()
+    
+            # builtins
+            if low in ["clear","cls","reset"]:
+                self.set_response("Cleared. What would you like to do next?")
+                return
+            if low in ["help","?","h"]:
+                self.set_response("Commands: open files | open terminal | open browser | open editor | system info | clear | help\nTip: Use Launcher tab for all apps, Settings for AI. Super+Space focuses here.")
+                return
+            if low in ["system info","info","status","sysinfo"]:
+                info = get_system_info()
+                txt = f"Memory: {info.get('mem_avail','?')}/{info.get('mem_total','?')} kB  Load: {' '.join(info.get('load',[]))}  Uptime: {info.get('uptime','?')}  Disk: {info.get('disk','?')[:60]}"
+                self.set_response(txt)
+                self.notebook.set_current_page(1)
+                return
+    
+            # destructive guard
+            if is_destructive(raw):
+                dialog = Gtk.MessageDialog(transient_for=self, flags=0, message_type=Gtk.MessageType.WARNING, buttons=Gtk.ButtonsType.OK_CANCEL, text=f"Confirm destructive action?\n\n'{raw}'\n\nThis requires explicit confirmation.")
+                dialog.format_secondary_text("JARVIS blocks risky commands until you confirm. This follows least-privilege.")
+                resp = dialog.run()
+                dialog.destroy()
+                if resp != Gtk.ResponseType.OK:
+                    self.set_response("Cancelled destructive action. No changes made.")
+                    return
+    
+            # app launch patterns
+            patterns = {
+                "files": "pcmanfm",
+                "file manager": "pcmanfm",
+                "terminal": "lxterminal",
+                "browser": "firefox-esr",
+                "firefox": "firefox-esr",
+                "editor": "mousepad",
+                "settings": "jarvis-settings",
+                "network": "nm-connection-editor",
+                "audio": "pavucontrol",
+                "bluetooth": "blueman-manager",
+            }
+            for keyword, cmd in patterns.items():
+                if keyword in low and ("open" in low or "launch" in low or "start" in low or low==keyword):
+                    self.launch_cmd(cmd, keyword)
+                    return
+            # direct open <app>
+            m = re.match(r"^(open|launch|start)\s+(.+)", low)
+            if m:
+                target = m.group(2).strip()
+                # search desktop apps
+                for app in self.all_apps_store:
+                    if target in app.get_display_name().lower() or target in app.get_id().lower():
+                        if launch_app(app):
+                            self.set_response(f"Launched {app.get_display_name()}")
+                        else:
+                            self.set_response(f"Failed to launch {app.get_display_name()}")
+                        return
+                # fallback try as command
+                if self.is_available(target.split()[0]):
+                    try:
+                        subprocess.Popen(shlex.split(target), stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                        self.set_response(f"Launched '{target}'")
+                        return
+                    except Exception as e:
+                        self.set_response(f"Could not launch '{target}': {e}")
+                        return
+                self.set_response(f"App '{target}' not found. Check Launcher tab or try 'help'.")
+                return
+    
+            # fallback: AI or offline echo
+            _, msg = ai_query(raw, self.config)
+            if "not configured" in msg.lower() or "offline" in msg.lower():
+                # offline: offer search or system help
+                if any(w in low for w in ["hello","hi","hey"]):
+                    self.set_response("Hello — JARVIS offline. I can launch apps, show system info, or open settings. Try 'open terminal' or 'system info'.")
+                else:
+                    self.set_response(f"{msg}\n\nYou said: '{raw}'\nOffline suggestions: 'open browser', 'open files', 'system info', or use the Launcher.")
+            else:
+                self.set_response(f"{msg}\n\nPrompt: '{raw}'\n(Online AI would respond here when network is available.)")
+    
+        def on_key(self, widget, event):
+            keyval = event.keyval
+            state = event.state
+            # Ctrl+Q quit
+            if (state & Gdk.ModifierType.CONTROL_MASK) and keyval == Gdk.KEY_q:
+                Gtk.main_quit()
+                return True
+            if keyval == Gdk.KEY_Escape:
+                self.entry.set_text("")
+                self.set_response("Cleared.")
+                return True
+            # Super+Space focus already handled by WM, but also handle here
+            return False
+    
+def main():
+    # Handle --cli / --test for headless validation (works without GTK)
+    if "--cli" in sys.argv or "--test" in sys.argv:
+        cfg = load_config()
+        info = get_system_info()
+        print(f"JARVIS CLI test OK - provider={cfg['ai_provider']} load={info.get('load')}")
+        if not HAS_GTK:
+            print("Note: GTK not available in this env - GUI not tested, but CLI passed.", file=sys.stderr)
+        return 0
+    if not HAS_GTK:
+        print("JARVIS requires GTK3 (gir1.2-gtk-3.0). Running in CLI fallback.", file=sys.stderr)
+        print("Available: launcher via 'gio launch' or directly run apps. Use --help for CLI.", file=sys.stderr)
+        if "--help" in sys.argv or "-h" in sys.argv:
+            print("Usage: jarvis-center [--cli]")
+            print("CLI commands: open files, open terminal, open browser, system info")
+        cfg = load_config()
+        print(f"Config: provider={cfg['ai_provider']} offline={cfg['offline_mode']}")
+        print(f"System: {get_system_info()}")
+        return 0
+    win = JarvisWindow()
+    Gtk.main()
+    return 0
+
+if __name__ == "__main__":
+    sys.exit(main())

@@ -1,0 +1,9 @@
+{
+  "_comment": "JARVIS config - copy to config.json and set your keys. Never commit real keys. chmod 600 config.json",
+  "ai_provider": "none",
+  "api_key": "",
+  "api_base": "",
+  "model": "",
+  "voice_enabled": false,
+  "offline_mode": true
+}

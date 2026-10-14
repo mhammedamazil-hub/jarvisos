@@ -1,0 +1,8 @@
+# firmware for Dell Inspiron 3558 (Intel)
+firmware-iwlwifi
+firmware-realtek
+firmware-atheros
+firmware-intel-graphics
+firmware-misc-nonfree
+intel-microcode
+amd64-microcode
